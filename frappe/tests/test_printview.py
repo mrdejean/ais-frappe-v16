@@ -83,9 +83,12 @@ class PrintViewTest(IntegrationTestCase):
 		):
 			report_to_pdf("<p>Report</p>")
 
-		bypass_hosts = get_pdf.call_args.args[1]["bypass-proxy-for"]
-		self.assertIn("plain.example.com", bypass_hosts)
-		self.assertIn("secure.example.com", bypass_hosts)
+		# Alternate-domain metadata must not grant network access to the guarded renderer.
+		options = get_pdf.call_args.args[1]
+		self.assertTrue(options["block-external-requests"])
+		self.assertNotIn("proxy", options)
+		self.assertNotIn("bypass-proxy-for", options)
+		self.assertTrue(get_pdf.call_args.kwargs["smart_shrinking"])
 
 	def test_preview_from_form_values_sees_native_types(self):
 		doctype = new_doctype(

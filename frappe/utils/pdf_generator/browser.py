@@ -42,6 +42,7 @@ class Browser:
 			self.try_async_header_footer_pdf()
 			# now wait for page to load as we need DOM to generate pdf
 			self.body_page.wait_for_set_content()
+			self.fit_body_to_page()
 			self.fit_body_height()
 			self.body_pdf = self.body_page.generate_pdf(raw=not self.header_page and not self.footer_page)
 			self.update_header_footer_page()
@@ -116,16 +117,41 @@ class Browser:
 
 		from frappe.utils.pdf_generator.page import Page
 
-		page = Page(self.session, self.browser_context_id, page_type)
+		page = Page(
+			self.session, self.browser_context_id, page_type,
+			block_external_requests=bool(self.options.get("block-external-requests")),
+		)
 		page.is_print_designer = self.is_print_designer
 
 		return page
 
 	def setup_body_page(self):
 		self.body_page = self.new_page("body")
-		self.body_page.set_tab_url(get_host_url())
+		self.body_page.set_tab_url(self.get_page_url())
 		self.body_page.wait_for_navigate()
 		self.body_page.set_content(str(self.soup))
+
+	def get_page_url(self):
+		if self.options.get("block-external-requests"):
+			from frappe.utils.pdf_generator.page import get_trusted_site_url
+
+			return get_trusted_site_url()
+		return get_host_url()
+
+	def fit_body_to_page(self):
+		# Ported from official 31e826a7: legacy wkhtmltopdf smart shrinking is
+		# explicit here, after layout and before page height/PDF generation.
+		if not self.options.get("shrink-to-fit"):
+			return
+		options = self.body_page.options
+		printable = 96 * (
+			options["paperWidth"] - options.get("marginLeft", 0) - options.get("marginRight", 0)
+		)
+		self.body_page.set_device_metrics(width=int(printable), height=1000)
+		result = self.body_page.evaluate("document.documentElement.scrollWidth")
+		content_width = (result or {}).get("result", {}).get("value") or 0
+		if content_width > printable:
+			options["scale"] = max(0.1, printable / content_width)
 
 	def fit_body_height(self):
 		if not self.options.get("fit-height"):
@@ -188,6 +214,7 @@ class Browser:
 			)
 		if self.header_page:
 			self.header_page.wait_for_set_content()
+			self._install_trusted_pagination(self.header_page)
 			self.header_height = self.header_page.get_element_height()
 			self.is_header_dynamic = self.is_page_no_used(self.header_content)
 			del self.header_content
@@ -196,10 +223,14 @@ class Browser:
 				self.header_page = None
 		if not self.header_page:
 			# bad implicit setting of margin #backwards-compatibility
-			options["margin-top"] = "15mm"
+			if options.get("block-external-requests"):
+				options.setdefault("margin-top", "15mm")
+			else:
+				options["margin-top"] = "15mm"
 
 		if self.footer_page:
 			self.footer_page.wait_for_set_content()
+			self._install_trusted_pagination(self.footer_page)
 			self.footer_height = self.footer_page.get_element_height()
 			self.is_footer_dynamic = self.is_page_no_used(self.footer_content)
 			del self.footer_content
@@ -208,7 +239,10 @@ class Browser:
 				self.footer_page = None
 		if not self.footer_page:
 			# bad implicit setting of margin #backwards-compatibility
-			options["margin-bottom"] = "15mm"
+			if options.get("block-external-requests"):
+				options.setdefault("margin-bottom", "15mm")
+			else:
+				options["margin-bottom"] = "15mm"
 
 		# Remove instances of them from main content for render_template
 		for html_id in ["header-html", "footer-html"]:
@@ -239,9 +273,18 @@ class Browser:
 		"""Make clone_and_update available to the header and footer pages, which take
 		their <head> contents from the body document."""
 		path = frappe.get_app_path("frappe", "utils", "pdf_generator", "update_page_no.js")
+		if self.options.get("block-external-requests"):
+			# Never enable page JavaScript or add an executable tag to untrusted
+			# HTML. CDP explicitly installs only this framework-owned helper.
+			self._trusted_pagination_script = frappe.read_file(path)
+			return
 		tag = soup.new_tag("script")
 		tag.append(soup.new_string(frappe.read_file(path)))
 		soup.head.append(tag)
+
+	def _install_trusted_pagination(self, page):
+		if self.options.get("block-external-requests"):
+			page.evaluate(self._trusted_pagination_script)
 
 	def try_async_header_footer_pdf(self):
 		if self.header_page and not self.is_header_dynamic:
@@ -354,11 +397,11 @@ class Browser:
 
 		# bad implicit setting of margin #backwards-compatibility
 		if not self.is_print_designer:
-			if not options.get("margin-right"):
-				options["margin-right"] = "15mm"
-
-			if not options.get("margin-left"):
-				options["margin-left"] = "15mm"
+			for margin in ("margin-right", "margin-left"):
+				if options.get("block-external-requests"):
+					options.setdefault(margin, "15mm")
+				elif not options.get(margin):
+					options[margin] = "15mm"
 
 		if not options.get("page-height") or not options.get("page-width"):
 			if not (page_size := self.options.get("page-size")):
@@ -426,6 +469,13 @@ class Browser:
 		if self.header_page:
 			header_with_top_margin = self.header_height + (0 if header_owns_top_margin else margin_top)
 			header_spacing = options.get("header-spacing", 0)
+			if options.get("block-external-requests") and isinstance(header_spacing, str):
+				# Print-format CSS is merged after caller option normalization.
+				if not re.fullmatch(r"\s*(?:\d+(?:\.\d*)?|\.\d+)(?:px|mm|cm|in)?\s*", header_spacing):
+					raise frappe.ValidationError("Invalid header spacing")
+				header_spacing = self._get_converted_num(header_spacing)
+				if header_spacing is None or header_spacing < 0:
+					raise frappe.ValidationError("Invalid header spacing")
 			header_with_spacing_top_margin = header_with_top_margin + header_spacing
 			self.header_page.options["paperHeight"] = (
 				convert_uom(header_with_spacing_top_margin, "px", "in", only_number=True)
@@ -530,11 +580,11 @@ class Browser:
 		# It sends CDP command to the browser to open a new tab.
 		if header_content := self.soup.find(id="header-html"):
 			self.header_page = self.new_page("header")
-			self.header_page.set_tab_url(get_host_url())
+			self.header_page.set_tab_url(self.get_page_url())
 
 		if footer_content := self.soup.find(id="footer-html"):
 			self.footer_page = self.new_page("footer")
-			self.footer_page.set_tab_url(get_host_url())
+			self.footer_page.set_tab_url(self.get_page_url())
 
 		self.header_content = header_content
 		self.footer_content = footer_content

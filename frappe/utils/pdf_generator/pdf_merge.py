@@ -8,6 +8,16 @@ class PDFTransformer:
 		self._set_footer_pdf()
 		if not self.header_pdf and not self.footer_pdf:
 			return
+		# pypdf 7 requires writer-owned pages before replace_contents mutates
+		# them. Keep the browser's reader pages unchanged while preserving the
+		# existing header/footer transformations and merge order.
+		from pypdf import PdfWriter
+
+		self.body_pdf = PdfWriter(clone_from=self.body_pdf)
+		if self.header_pdf:
+			self.header_pdf = PdfWriter(clone_from=self.header_pdf)
+		if self.footer_pdf:
+			self.footer_pdf = PdfWriter(clone_from=self.footer_pdf)
 		self.no_of_pages = len(self.body_pdf.pages)
 		# if not header / footer then return body pdf
 

@@ -394,7 +394,7 @@ def download_pdf(
 	no_letterhead: bool | int = 0,
 	language: str | None = None,
 	letterhead: str | None = None,
-	pdf_generator: Literal["wkhtmltopdf", "chrome", "PlutoPrint", "Typst", "WeasyPrint"] | None = None,
+	pdf_generator: Literal["chrome", "PlutoPrint", "Typst", "WeasyPrint"] | None = None,
 	style: str | None = None,
 	settings: str | None = None,
 ):
@@ -429,9 +429,7 @@ def report_to_pdf(html: str, orientation: str = "Landscape"):
 		html,
 		{
 			"orientation": orientation,
-			"proxy": "http://0.0.0.0:0",
-			"bypass-proxy-for": _pdf_bypass_proxy_hosts(),
-			"load-error-handling": "ignore",
+			"block-external-requests": True,
 		},
 		smart_shrinking=True,
 	)

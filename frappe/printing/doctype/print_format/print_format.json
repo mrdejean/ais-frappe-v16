@@ -320,7 +320,8 @@
    "fieldname": "pdf_generator",
    "fieldtype": "Select",
    "label": "PDF Generator",
-   "options": "\nwkhtmltopdf\nchrome\nPlutoPrint\nTypst\nWeasyPrint"
+   "options": "\nchrome\nPlutoPrint\nTypst\nWeasyPrint",
+   "description": "wkhtmltopdf is unavailable in this renderer candidate. Review migrated and custom PDF output before use."
   },
   {
    "depends_on": "eval:!doc.print_format_builder_beta && !doc.raw_printing && ['chrome', 'PlutoPrint'].includes(doc.pdf_generator || doc.__onload?.pdf_generator)",

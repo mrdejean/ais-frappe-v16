@@ -26,7 +26,7 @@ class PrintSettings(Document):
 		font_size: DF.Float
 		max_bulk_print_docs: DF.Int
 		max_concurrent_bulk_exports: DF.Int
-		pdf_generator: DF.Literal["wkhtmltopdf", "chrome", "PlutoPrint"]
+		pdf_generator: DF.Literal["chrome", "PlutoPrint"]
 		pdf_page_height: DF.Float
 		pdf_page_size: DF.Literal[
 			"A0",
@@ -70,8 +70,18 @@ class PrintSettings(Document):
 	# end: auto-generated types
 
 	def validate(self):
+		self.validate_pdf_generator()
 		if self.pdf_page_size == "Custom" and not (self.pdf_page_height and self.pdf_page_width):
 			frappe.throw(_("Page height and width cannot be zero"))
+
+	def validate_pdf_generator(self):
+		if not self.pdf_generator:
+			self.pdf_generator = "chrome"
+		if self.pdf_generator == "wkhtmltopdf":
+			frappe.throw(
+				_("This renderer is unavailable. Select Chrome and review migrated/custom PDF output before use."),
+				title=_("PDF renderer review required"),
+			)
 
 	def on_update(self):
 		frappe.clear_cache()

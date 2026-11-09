@@ -1,6 +1,11 @@
 import base64
+import mimetypes
+import os
+import re
 import time
 import urllib
+
+from bs4 import BeautifulSoup
 
 import frappe
 from frappe.core.doctype.file.utils import find_file_by_url
@@ -10,6 +15,118 @@ from frappe.utils.pdf import get_host_url
 CDP commands documentation can be found here.
 https://chromedevtools.github.io/devtools-protocol/
 """
+
+
+def resource_origin(url: str) -> tuple[str, str, int] | None:
+	"""Compare parsed HTTP origins, never a request-controlled URL prefix."""
+	try:
+		parsed = urllib.parse.urlsplit(url)
+		if parsed.scheme not in ("http", "https") or not parsed.hostname:
+			return None
+		if parsed.username is not None or parsed.password is not None:
+			return None
+		default_port = 443 if parsed.scheme == "https" else 80
+		return (
+			parsed.scheme,
+			parsed.hostname.encode("idna").decode("ascii").lower(),
+			parsed.port if parsed.port is not None else default_port,
+		)
+	except (TypeError, ValueError, UnicodeError):
+		return None
+
+
+def get_trusted_site_url() -> str:
+	"""The initialized site's configured origin, independent of Host/forwarded headers.
+
+	Guarded pages never fetch this origin over the network: it only identifies the
+	local public/private files that the current Frappe principal can read.
+	"""
+	if not getattr(frappe.local, "site", None):
+		raise ValueError("Guarded PDF rendering requires an initialized site")
+	url = frappe.utils.get_url(allow_header_override=False)
+	parsed = urllib.parse.urlsplit(url)
+	origin = resource_origin(url)
+	if not origin or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+		raise ValueError("Guarded PDF rendering requires a configured HTTP site origin")
+	scheme, hostname, port = origin
+	authority = f"[{hostname}]" if ":" in hostname else hostname
+	if port != (443 if scheme == "https" else 80):
+		authority += f":{port}"
+	# Chromium canonicalizes a root navigation to '/'. The initial Fetch stub
+	# must use this exact URL, not an origin string with an empty path.
+	return urllib.parse.urlunsplit((scheme, authority, "/", "", ""))
+
+
+def sanitize_guarded_html(html: str, site_url: str) -> str:
+	"""Remove executable markup and install a restrictive resource policy.
+
+	CDP also disables page JavaScript and denies every request which cannot be
+	fulfilled locally. The CSP covers schemes (notably file:) which may never
+	produce a Fetch interception event. Trusted pagination runs explicitly via CDP.
+	"""
+	soup = BeautifulSoup(html, "html5lib")
+	for tag in soup.find_all([
+		"script", "iframe", "frame", "frameset", "object", "embed", "base",
+		"animate", "animatemotion", "animatetransform", "set",
+	]):
+		tag.decompose()
+	for tag in soup.find_all("meta"):
+		if str(tag.get("http-equiv", "")).lower() in ("refresh", "content-security-policy"):
+			tag.decompose()
+	for tag in soup.find_all(True):
+		for attribute in list(tag.attrs):
+			if attribute.lower().startswith("on") or attribute.lower() in ("srcdoc", "ping"):
+				del tag.attrs[attribute]
+			elif attribute.lower() in ("href", "src", "xlink:href", "action", "formaction", "poster", "data"):
+				value = re.sub(r"[\x00-\x20\x7f-\x9f]", "", str(tag.attrs[attribute])).lower()
+				if value.startswith(("javascript:", "vbscript:", "file:", "blob:")) or (
+					attribute.lower() in ("href", "xlink:href") and value.startswith("data:")
+				):
+					del tag.attrs[attribute]
+	policy = (
+		"default-src 'none'; script-src 'none'; "
+		# The document was stub-navigated to the trusted configured origin.
+		# 'self' also works for valid site URLs (e.g. test_ais.localhost) whose
+		# host cannot appear in CSP's narrower host-source grammar.
+		"style-src 'unsafe-inline' 'self'; img-src data: 'self'; font-src data: 'self'; "
+		"connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+	)
+	meta = soup.new_tag("meta", attrs={"http-equiv": "Content-Security-Policy", "content": policy})
+	soup.head.insert(0, meta)
+	return str(soup)
+
+
+def read_guarded_local_resource(url: str) -> tuple[str, str | None] | None:
+	"""Resolve only canonical public assets or principal-authorized private files.
+
+	Unlike the upstream reader, resolve asset symlinks against trusted app public
+	roots too. Bench asset symlinks are required for normal framework CSS/fonts;
+	a symlink to any other bench/system file is not an asset.
+	"""
+	parsed = urllib.parse.urlsplit(url)
+	path = urllib.parse.unquote(parsed.path)
+	if "\\" in path or "\x00" in path or any(part in (".", "..") for part in path.split("/")):
+		return None
+	clean_path = path.lstrip("/")
+	if not clean_path:
+		return None
+	if clean_path.startswith("assets/"):
+		asset_root = os.path.realpath(os.path.join(frappe.utils.get_bench_path(), "sites", "assets"))
+		final_path = os.path.realpath(os.path.join(asset_root, clean_path.removeprefix("assets/")))
+		roots = [asset_root]
+		for app in frappe.get_installed_apps():
+			roots.append(os.path.realpath(frappe.get_app_path(app, "public")))
+		if not any(os.path.commonpath([final_path, root]) == root for root in roots):
+			return None
+		if os.path.isfile(final_path) and (content := frappe.read_file(final_path, as_base64=True)):
+			return content, mimetypes.guess_type(final_path)[0]
+		return None
+	# The established reader performs File permission checks and confines real
+	# paths to the current site's public or private/files directory.
+	if resource := read_local_resource(url):
+		content, content_type = resource
+		return content, content_type or mimetypes.guess_type(path)[0]
+	return None
 
 
 def read_local_resource(url: str) -> tuple[str, str | None] | None:
@@ -60,8 +177,14 @@ def read_local_resource(url: str) -> tuple[str, str | None] | None:
 
 
 class Page:
-	def __init__(self, session, browser_context_id, page_type):
+	# Preserve the original unguarded behavior for callers/tests which create a
+	# Page without __init__; guarded construction always overrides this value.
+	block_external_requests = False
+
+	def __init__(self, session, browser_context_id, page_type, block_external_requests=False):
 		self.session = session
+		self.block_external_requests = block_external_requests
+		self.trusted_site_url = get_trusted_site_url() if block_external_requests else None
 		result, error = self.session.send(
 			"Target.createTarget", {"url": "", "browserContextId": browser_context_id}
 		)
@@ -80,7 +203,10 @@ class Page:
 		self.frame_id = None
 		self.get_frame_id_on_demand()
 		self.set_media_emulation("print")
-		self.set_cookies()
+		if self.block_external_requests:
+			self.send("Emulation.setScriptExecutionDisabled", {"value": True})
+		else:
+			self.set_cookies()
 
 	# TODO: make send to return future and don't wait for it by default.
 	def send(self, method, params=None, return_future=False):
@@ -133,6 +259,24 @@ class Page:
 
 	def intercept_request_and_fulfill(self, url_pattern):
 		"""Starts intercepting network requests for the given target_id and URL pattern."""
+		if self.block_external_requests:
+			# Install one deny-by-default handler before navigating. Keep it
+			# active through the empty-root/content handoff and all later loads.
+			self._guarded_stub_future = self.session.loop.create_future()
+			self._guarded_resources_enabled = False
+			self.intercept_request_for_local_resources()
+
+			def fulfill_guarded_root():
+				self.session.wait_for_event(self._guarded_stub_future)
+				request_id = self._guarded_stub_future.result()
+				self.send(
+					"Fetch.fulfillRequest",
+					{"requestId": request_id, "responseCode": 200},
+					return_future=True,
+				)
+				del self._guarded_stub_future
+
+			return fulfill_guarded_root
 		data = {}
 
 		def on_request_paused_event(future, response):
@@ -164,6 +308,11 @@ class Page:
 
 	def intercept_request_for_local_resources(self, url_pattern="*"):
 		"""Starts intercepting network requests for the given target_id and URL pattern."""
+		if self.block_external_requests and getattr(self, "_guarded_fetch_installed", False):
+			# The same handler now permits only authorized local file reads.
+			# Fetch is never disabled and there is no listenerless interval.
+			self._guarded_resources_enabled = True
+			return
 		data = {}
 
 		def on_request_paused_event(future, response):
@@ -172,6 +321,37 @@ class Page:
 			if params and params.get("requestId"):
 				data["request_id"] = params["requestId"]
 				url = params["request"]["url"]
+				if self.block_external_requests:
+					stub = getattr(self, "_guarded_stub_future", None)
+					if stub is not None and not stub.done() and url == self.trusted_site_url:
+						stub.set_result(data["request_id"])
+						return
+					resource = None
+					if (
+						getattr(self, "_guarded_resources_enabled", False)
+						and resource_origin(url) == resource_origin(self.trusted_site_url)
+					):
+						resource = read_guarded_local_resource(url)
+					if resource:
+						content, content_type = resource
+						self.send(
+							"Fetch.fulfillRequest",
+							{
+								"requestId": data["request_id"],
+								"responseCode": 200,
+								"responseHeaders": [{"name": "Content-Type", "value": content_type}]
+								if content_type else [],
+								"body": content,
+							},
+							return_future=True,
+						)
+					else:
+						self.send(
+							"Fetch.failRequest",
+							{"requestId": data["request_id"], "errorReason": "AccessDenied"},
+							return_future=True,
+						)
+					return
 
 				if isinstance(url, str) and url.startswith(get_host_url()):
 					if resource := read_local_resource(url):
@@ -206,12 +386,17 @@ class Page:
 		self.session.start_listener(
 			"Fetch.requestPaused", on_request_paused_event, self.session_id, self.target_id, self.frame_id
 		)
+		if self.block_external_requests:
+			self._guarded_fetch_installed = True
 
 		# Enable request interception for the specified URL pattern
-		self.send("Fetch.enable", {"patterns": [{"urlPattern": url_pattern}]})
+		pattern = "*" if self.block_external_requests else url_pattern
+		self.send("Fetch.enable", {"patterns": [{"urlPattern": pattern}]})
 
 	def set_tab_url(self, url):
 		"""Navigate to a URL and fulfill the request with status code 200."""
+		if self.block_external_requests and url != self.trusted_site_url:
+			raise ValueError("Guarded PDF pages require the configured site origin")
 
 		# Intercept and fulfill request with 200 status code
 		wait_and_fulfill = self.intercept_request_and_fulfill(url)
@@ -228,6 +413,8 @@ class Page:
 
 	def navigate(self, url, wait_for=None):
 		"""Really load a URL and wait for render (vs set_tab_url's empty-body stub)."""
+		if self.block_external_requests:
+			raise ValueError("Guarded PDF pages do not navigate to network URLs")
 		wait_start = self.wait_for_load(wait_for=wait_for or ["load", "DOMContentLoaded", "networkIdle"])
 		_result, error = self.send("Page.navigate", {"url": url})
 		if error:
@@ -259,6 +446,8 @@ class Page:
 	# if you face header Height to be incorrect as some external script is changing elements.
 	# networkIdle is most stable option but make it a lot slower so avoiding for now. enable if not stable
 	def set_content(self, html, wait_for=None):
+		if self.block_external_requests:
+			html = sanitize_guarded_html(html, self.trusted_site_url)
 		if not wait_for:
 			wait_for = ["load", "DOMContentLoaded"]
 		self.intercept_request_for_local_resources()

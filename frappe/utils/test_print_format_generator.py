@@ -457,15 +457,16 @@ class TestPrintFormatGenerator(IntegrationTestCase):
 		self.assertIsNone(_print_format_doc_or_none(None))
 
 	def test_pdf_generator_resolution_keeps_the_stored_choice(self):
-		"""A plain format prints with its own engine, while a
-		beta format stays pinned to chrome — wkhtmltopdf cannot lay out its flexbox columns."""
+		"""Retain supported choices; the removed engine must fail explicitly."""
 		from frappe.utils.print_utils import resolve_pdf_generator
 
 		beta = self._make_print_format()
-		self.assertEqual(resolve_pdf_generator(None, "wkhtmltopdf"), "wkhtmltopdf")
+		with self.assertRaises(frappe.ValidationError):
+			resolve_pdf_generator(None, "wkhtmltopdf")
 		self.assertEqual(resolve_pdf_generator(None, "chrome"), "chrome")
 		self.assertEqual(resolve_pdf_generator(beta), "chrome")
-		self.assertEqual(resolve_pdf_generator(beta, "wkhtmltopdf"), "chrome")
+		with self.assertRaises(frappe.ValidationError):
+			resolve_pdf_generator(beta, "wkhtmltopdf")
 
 	def test_standard_print_follows_print_settings_pdf_generator(self):
 		"""Standard (no print format) must honour Print Settings, while a beta format
@@ -476,12 +477,14 @@ class TestPrintFormatGenerator(IntegrationTestCase):
 		original = frappe.db.get_single_value("Print Settings", "pdf_generator")
 		self.addCleanup(frappe.db.set_single_value, "Print Settings", "pdf_generator", original)
 
-		for setting in ("wkhtmltopdf", "chrome"):
+		for setting in ("chrome", "Typst", "custom-hook"):
 			frappe.db.set_single_value("Print Settings", "pdf_generator", setting)
 			self.assertEqual(resolve_pdf_generator(None), setting)
 			self.assertEqual(resolve_pdf_generator(beta), "chrome")
 
 		frappe.db.set_single_value("Print Settings", "pdf_generator", "wkhtmltopdf")
+		with self.assertRaises(frappe.ValidationError):
+			resolve_pdf_generator(None)
 		self.assertEqual(resolve_pdf_generator(None, "chrome"), "chrome")
 
 	# ------------------------------------------------------------------ #

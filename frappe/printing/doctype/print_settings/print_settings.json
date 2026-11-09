@@ -185,11 +185,11 @@
   },
   {
    "default": "chrome",
-   "description": "wkhtmltopdf is deprecated and will be removed in version 17. Chrome is the supported renderer.",
+   "description": "wkhtmltopdf is unavailable in this renderer candidate. Review migrated and custom PDF output before use.",
    "fieldname": "pdf_generator",
    "fieldtype": "Select",
    "label": "PDF Generator",
-   "options": "wkhtmltopdf\nchrome\nPlutoPrint"
+   "options": "chrome\nPlutoPrint"
   },
   {
    "default": "100",

@@ -40,6 +40,12 @@ def resolve_pdf_generator(print_format=None, pdf_generator: str | None = None) -
 	from frappe.printing.doctype.print_format.classic_converter import uses_beta_renderer
 	from frappe.utils.pdf_generator.pluto import plutoprint_blockers
 
+	if pdf_generator == "wkhtmltopdf" or (print_format and print_format.get("pdf_generator") == "wkhtmltopdf"):
+		frappe.throw(
+			"wkhtmltopdf is unavailable in the isolated pdfkit-free prototype. "
+			"Review and migrate Print Settings and the Print Format to Chrome before printing.",
+			frappe.ValidationError,
+		)
 	if print_format and uses_beta_renderer(print_format):
 		stored = print_format.get("pdf_generator")
 		if stored in ("Typst", "WeasyPrint"):
@@ -52,7 +58,13 @@ def resolve_pdf_generator(print_format=None, pdf_generator: str | None = None) -
 		generator = (
 			(print_format and print_format.get("pdf_generator"))
 			or frappe.db.get_single_value("Print Settings", "pdf_generator")
-			or "wkhtmltopdf"
+			or "chrome"
+		)
+	if generator == "wkhtmltopdf":
+		frappe.throw(
+			"wkhtmltopdf is unavailable in the isolated pdfkit-free prototype. "
+			"Review and migrate Print Settings and the Print Format to Chrome before printing.",
+			frappe.ValidationError,
 		)
 	if generator == "PlutoPrint" and plutoprint_blockers(print_format):
 		return "chrome"
@@ -88,7 +100,7 @@ def get_print(
 	password=None,
 	pdf_options=None,
 	letterhead=None,
-	pdf_generator: Literal["wkhtmltopdf", "chrome", "PlutoPrint", "Typst", "WeasyPrint"] | None = None,
+	pdf_generator: Literal["chrome", "PlutoPrint", "Typst", "WeasyPrint"] | None = None,
 	settings=None,
 ):
 	"""Get Print Format for given document.
@@ -98,7 +110,7 @@ def get_print(
 	:param style: Print Format style.
 	:param as_pdf: Return as PDF. Default False.
 	:param password: Password to encrypt the pdf with. Default None
-	:param pdf_generator: PDF generator to use. Default 'wkhtmltopdf'
+	:param pdf_generator: PDF generator to use. Default 'chrome'
 	"""
 
 	"""
@@ -108,19 +120,23 @@ def get_print(
 	import copy
 
 	from frappe.printing.doctype.print_format.classic_converter import uses_beta_renderer
-	from frappe.utils.pdf import get_pdf
+	from frappe.utils.pdf import _chrome_options, get_pdf
 	from frappe.utils.print_format_generator import restore_print_context, set_print_context
 	from frappe.website.serve import get_response_without_exception_handling
 
 	local = frappe.local
 	pf_doc = _print_format_doc_or_none(print_format)
 	generator = local.form_dict.get("pdf_generator")
+	if (
+		generator == "wkhtmltopdf"
+		or pdf_generator == "wkhtmltopdf"
+		or (pf_doc and pf_doc.get("pdf_generator") == "wkhtmltopdf")
+	):
+		resolve_pdf_generator(pf_doc, "wkhtmltopdf")
 	if not generator or (uses_beta_renderer(pf_doc) and generator not in GENERATOR_ENGINES):
 		generator = resolve_pdf_generator(pf_doc, pdf_generator)
 
 	settings = settings or local.form_dict.get("settings")
-	if as_pdf and generator == "wkhtmltopdf" and settings:
-		settings = {key: value for key, value in frappe.parse_json(settings).items() if key != "print_font"}
 
 	original_form_dict = copy.deepcopy(local.form_dict)
 	try:
@@ -135,7 +151,7 @@ def get_print(
 		local.form_dict.settings = settings
 
 		pdf_options = pdf_options or {}
-		if password:
+		if password is not None:
 			pdf_options["password"] = password
 
 		if as_pdf and generator in (*HTML_PDF_GENERATORS, "Typst") and pf_doc and uses_beta_renderer(pf_doc):
@@ -156,7 +172,7 @@ def get_print(
 				method="Print",
 				page=f"Print Format: {pf_doc.name}",
 			)
-			if output:
+			if output is not None:
 				from io import BytesIO
 
 				from pypdf import PdfReader
@@ -172,49 +188,60 @@ def get_print(
 		if not as_pdf:
 			return html
 
-		if generator != "wkhtmltopdf":
-			previous = set_print_context(
-				doctype=doctype,
-				name=name,
-				doc=doc,
-				letterhead=letterhead,
-				no_letterhead=no_letterhead,
-				settings=settings,
-				generator=None,
-			)
-			try:
-				for hook in frappe.get_hooks("pdf_generator"):
-					"""
-					check pdf_generator value in your hook function.
-					if it matches run and return pdf else return None
-					"""
-					# nosemgrep: frappe-semgrep-rules.rules.security.frappe-codeinjection-eval
-					pdf = frappe.call(
-						hook,
-						print_format=print_format,
-						html=html,
-						options=pdf_options,
-						output=output,
-						pdf_generator=generator,
-					)
-					# if hook returns a value, assume it was the correct pdf_generator and return it
-					if pdf:
-						if output and isinstance(pdf, bytes):
-							from io import BytesIO
-
-							from pypdf import PdfReader
-
-							reader = PdfReader(BytesIO(pdf))
-							for page in reader.pages:
-								output.add_page(page)
-							return output
-						return pdf
-			finally:
-				restore_print_context(previous)
+		if generator == "chrome":
+			# The built-in Chrome hook returns before the get_pdf fallback below.
+			# Apply the same bounded mandatory policy before any Chrome hook runs.
+			pdf_options = _chrome_options(pdf_options)
 
 		_run_print_pdf_hooks(doctype, name, print_format)
 
-		return get_pdf(html, options=pdf_options, output=output)
+		previous = set_print_context(
+			doctype=doctype,
+			name=name,
+			doc=doc,
+			letterhead=letterhead,
+			no_letterhead=no_letterhead,
+			settings=settings,
+			generator=None,
+		)
+		try:
+			for hook in frappe.get_hooks("pdf_generator"):
+				"""
+				check pdf_generator value in your hook function.
+				if it matches run and return pdf else return None
+				"""
+				# nosemgrep: frappe-semgrep-rules.rules.security.frappe-codeinjection-eval
+				pdf = frappe.call(
+					hook,
+					print_format=print_format,
+					html=html,
+					options=pdf_options,
+					output=output,
+					pdf_generator=generator,
+				)
+				# if hook returns a value, assume it was the correct pdf_generator and return it
+				if pdf:
+					if output is not None and isinstance(pdf, bytes):
+						from io import BytesIO
+
+						from pypdf import PdfReader
+
+						reader = PdfReader(BytesIO(pdf))
+						for page in reader.pages:
+							output.add_page(page)
+						return output
+					return pdf
+		finally:
+			restore_print_context(previous)
+
+		if generator != "chrome":
+			frappe.throw(
+				"The selected PDF renderer did not produce a PDF. Review its trusted app hook; "
+				"this prototype will not silently substitute another renderer.",
+				frappe.ValidationError,
+			)
+
+		return get_pdf(html, options=pdf_options, output=output, print_format=print_format)
 	finally:
 		local.form_dict = original_form_dict
 
@@ -275,7 +302,7 @@ def attach_print(
 			if cint(print_settings.send_print_as_pdf):
 				ext = ".pdf"
 				if html:
-					content = get_pdf(html, options={"password": password} if password else None)
+					content = get_pdf(html, options={"password": password} if password is not None else None)
 				elif renders_through_generator(pf_doc):
 					from frappe.printing.doctype.print_format.classic_converter import uses_legacy_weasyprint
 					from frappe.www.printview import validate_print_for_docstatus
@@ -344,15 +371,22 @@ def setup_chromium():
 
 
 def find_or_download_chromium_executable():
-	"""Finds the Chromium executable or downloads if not found."""
+	"""Find provisioned Chromium without downloading during a render request."""
 	import platform
 	import shutil
 	from pathlib import Path
 
-	import click
-
-	if chromium_path := shutil.which(frappe.get_common_site_config().get("chromium_path", "")):
-		return chromium_path
+	common_config = frappe.get_common_site_config()
+	if "chromium_path" in common_config:
+		configured_path = common_config["chromium_path"]
+		if isinstance(configured_path, str) and configured_path:
+			if chromium_path := shutil.which(configured_path):
+				return chromium_path
+		frappe.throw(
+			"Configured chromium_path is not an executable. Provision and verify Chromium, "
+			"then set chromium_path before requesting a PDF. No download was attempted.",
+			frappe.ValidationError,
+		)
 
 	bench_path = frappe.utils.get_bench_path()
 	"""Determine the path to the Chromium executable."""
@@ -361,20 +395,20 @@ def find_or_download_chromium_executable():
 	platform_name = platform.system().lower()
 
 	if platform_name not in ["linux", "darwin", "windows"]:
-		click.echo(f"Unsupported platform: {platform_name}")
+		frappe.throw(f"Unsupported Chromium platform: {platform_name}", frappe.ValidationError)
 
 	executable_name = EXECUTABLE_PATHS.get(platform_name)
 
 	# Construct the full path to the executable
 	exec_path = Path(chromium_dir).joinpath(*executable_name)
 	if not exec_path.exists():
-		click.echo("Chromium is not available. downloading...")
-		download_chromium()
+		frappe.throw(
+			"Chromium is not provisioned. Install and verify a reviewed Chromium binary, "
+			"then configure chromium_path before requesting a PDF. No download was attempted.",
+			frappe.ValidationError,
+		)
 	else:
 		make_chromium_executable(str(exec_path))
-
-	if not exec_path.exists():
-		click.echo("Error while downloading chrome")
 
 	return str(exec_path)
 

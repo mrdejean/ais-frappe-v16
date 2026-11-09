@@ -68,7 +68,7 @@ class PrintFormat(Document):
 			"Hide", "Top Left", "Top Center", "Top Right", "Bottom Left", "Bottom Center", "Bottom Right"
 		]
 		paper_size: DF.Literal["", "A4", "A5", "A3", "Letter", "Legal", "Receipt 80 mm", "Receipt 58 mm"]
-		pdf_generator: DF.Literal["", "wkhtmltopdf", "chrome", "PlutoPrint", "Typst", "WeasyPrint"]
+		pdf_generator: DF.Literal["", "chrome", "PlutoPrint", "Typst", "WeasyPrint"]
 		preview_image: DF.AttachImage | None
 		print_format_builder: DF.Check
 		print_format_builder_beta: DF.Check
@@ -119,6 +119,7 @@ class PrintFormat(Document):
 		return download_pdf(self.doc_type, docname, self.name, letterhead)
 
 	def validate(self):
+		self.validate_pdf_generator()
 		if (
 			self.standard == "Yes"
 			and not frappe.local.conf.get("developer_mode")
@@ -157,6 +158,13 @@ class PrintFormat(Document):
 		self.validate_weasyprint_layout()
 		self.validate_typst_renderer()
 		self.validate_plutoprint_renderer()
+
+	def validate_pdf_generator(self):
+		if self.pdf_generator == "wkhtmltopdf":
+			frappe.throw(
+				_("This renderer is unavailable. Select Chrome and review migrated/custom PDF output before use."),
+				title=_("PDF renderer review required"),
+			)
 
 	def validate_no_classic_layout(self):
 		"""A builder format cannot carry a classic list layout; conversion is explicit."""
