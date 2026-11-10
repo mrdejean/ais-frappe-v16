@@ -26,10 +26,11 @@ def record_print(**kwargs):
 
 def pdf_with_document_level_js() -> bytes:
 	from pypdf import PdfWriter
+	from pypdf.actions import JavaScript
 
 	writer = PdfWriter()
 	writer.add_blank_page(width=72, height=72)
-	writer.add_js("app.alert('hello from pdf');")
+	writer.add_open_action(JavaScript("app.alert('hello from pdf');"))
 	stream = io.BytesIO()
 	writer.write(stream)
 	return stream.getvalue()
@@ -55,10 +56,11 @@ def pdf_with_page_level_js() -> bytes:
 
 def encrypted_pdf_with_js() -> bytes:
 	from pypdf import PdfWriter
+	from pypdf.actions import JavaScript
 
 	writer = PdfWriter()
 	writer.add_blank_page(width=72, height=72)
-	writer.add_js("app.alert('hello from encrypted');")
+	writer.add_open_action(JavaScript("app.alert('hello from encrypted');"))
 	writer.encrypt("frappe")
 	stream = io.BytesIO()
 	writer.write(stream)
@@ -112,8 +114,23 @@ class TestPdf(IntegrationTestCase):
 	def runTest(self):
 		self.test_read_options_from_html()
 
+	def _browser_options_from_html(self, html):
+		"""Exercise CSS parsing and the default paper size without launching a browser."""
+		from bs4 import BeautifulSoup
+
+		from frappe.utils.pdf_generator.browser import Browser
+
+		browser = Browser.__new__(Browser)
+		browser.is_print_designer = False
+		browser.print_format = None
+		browser.options = {}
+		browser.soup = BeautifulSoup(html, "html5lib")
+		browser._parse_pdf_options_from_html()
+		browser._set_default_page_size()
+		return browser.options
+
 	def test_read_options_from_html(self):
-		_, html_options = pdfgen.read_options_from_html(self.html)
+		html_options = self._browser_options_from_html(self.html)
 		self.assertTrue(html_options["margin-top"] == "0")
 		self.assertTrue(html_options["margin-left"] == "10mm")
 		self.assertTrue(html_options["margin-right"] == "0")
@@ -132,7 +149,7 @@ class TestPdf(IntegrationTestCase):
 			</style>
 			<div class="more-info">Hello</div>
 		"""
-		_, options = pdfgen.read_options_from_html(html_1)
+		options = self._browser_options_from_html(html_1)
 
 		self.assertTrue(options["margin-top"] == "0")
 		self.assertTrue(options["margin-left"] == "10mm")
@@ -145,7 +162,7 @@ class TestPdf(IntegrationTestCase):
 		html = """<style></style>
 			<div class="more-info">Hello</div>
 		"""
-		_, options = pdfgen.read_options_from_html(html)
+		options = self._browser_options_from_html(html)
 		self.assertTrue(options)
 
 	def test_pdf_encryption(self):
@@ -351,20 +368,20 @@ class TestPdf(IntegrationTestCase):
 
 		captured = {}
 
-		def capture_options(html, options=None, verbose=True):
+		def capture_options(print_format, html, options):
 			captured.clear()
 			captured.update(options or {})
 			return blank_pdf()
 
-		with (
-			patch.object(pdfgen.pdfkit, "from_string", side_effect=capture_options),
-			patch.object(pdfgen, "get_wkhtmltopdf_version", return_value="0.12.6"),
-		):
+		with patch.object(pdfgen, "_render_chrome_pdf", side_effect=capture_options):
 			pdfgen.get_pdf(self.html)
-			self.assertIn("disable-smart-shrinking", captured)
+			self.assertFalse(captured["shrink-to-fit"])
 
 			pdfgen.get_pdf(self.html, smart_shrinking=True)
-			self.assertNotIn("disable-smart-shrinking", captured)
+			self.assertTrue(captured["shrink-to-fit"])
+
+			pdfgen.get_pdf(self.html, options={"disable-smart-shrinking": ""}, smart_shrinking=True)
+			self.assertFalse(captured["shrink-to-fit"])
 
 	def test_report_pdf_is_scaled_to_fit_the_page(self):
 		from unittest.mock import patch
@@ -417,8 +434,13 @@ class TestPdf(IntegrationTestCase):
 		self.addCleanup(frappe.set_user, "Administrator")
 		frappe.set_user("test@example.com")
 
-		pdfgen.read_options_from_html(
-			f'<style>@import url("http://127.0.0.1:{server.server_port}/print.css");</style><p>row</p>'
+		from bs4 import BeautifulSoup
+
+		pdfgen.get_print_format_styles(
+			BeautifulSoup(
+				f'<style>@import url("http://127.0.0.1:{server.server_port}/print.css");</style><p>row</p>',
+				"html5lib",
+			)
 		)
 		self.assertEqual(requested, [])
 

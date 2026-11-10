@@ -847,7 +847,16 @@ def check_safe_sql_query(query: str, throw: bool = True) -> bool:
 	query = query.strip().lower()
 	whitelisted_statements = ("select", "explain")
 
-	if re.search(r"\binto\s+(outfile|dumpfile)\b", query):
+	if "__auth" in query:
+		if throw:
+			frappe.throw(
+				_("Reading passwords is not allowed"),
+				title=_("Unsafe SQL query"),
+				exc=frappe.PermissionError,
+			)
+		return False
+
+	if re.search(r"outfile|dumpfile", query):
 		if throw:
 			frappe.throw(
 				_("Read-Only queries are allowed"),

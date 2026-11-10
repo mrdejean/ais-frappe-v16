@@ -588,12 +588,12 @@ class PrintFormatGenerator:
 
 		pf = self.print_format
 		generator_name = pf.get("pdf_generator") or "chrome"
-		if generator_name == "PlutoPrint":
+		if generator_name in ("PlutoPrint", "wkhtmltopdf"):
 			from frappe.utils.print_utils import resolve_pdf_generator
 
-			generator_name = resolve_pdf_generator(pf)
-		# chrome and PlutoPrint render below; wkhtmltopdf never reached hooks before this branch either
-		if generator_name not in (*HTML_PDF_GENERATORS, "wkhtmltopdf"):
+			generator_name = resolve_pdf_generator(pf, pdf_generator=generator_name)
+		# Legacy wkhtml formats must be migrated explicitly, never silently substituted.
+		if generator_name not in HTML_PDF_GENERATORS:
 			previous = set_print_context(
 				doctype=self.doc.doctype,
 				name=self.doc.name,
