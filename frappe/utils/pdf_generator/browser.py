@@ -118,7 +118,9 @@ class Browser:
 		from frappe.utils.pdf_generator.page import Page
 
 		page = Page(
-			self.session, self.browser_context_id, page_type,
+			self.session,
+			self.browser_context_id,
+			page_type,
 			block_external_requests=bool(self.options.get("block-external-requests")),
 		)
 		page.is_print_designer = self.is_print_designer

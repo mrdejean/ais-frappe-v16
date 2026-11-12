@@ -1044,7 +1044,7 @@ test.describe("Print Format form — renderer notice", () => {
 			fieldname: "pdf_generator",
 		});
 		default_generator = r.message.pdf_generator;
-		await api.set_value("Print Settings", "Print Settings", { pdf_generator: "wkhtmltopdf" });
+		await api.set_value("Print Settings", "Print Settings", { pdf_generator: "chrome" });
 	});
 
 	test.afterEach(async ({ api }) => {
@@ -1053,7 +1053,7 @@ test.describe("Print Format form — renderer notice", () => {
 		});
 	});
 
-	test("treats an empty renderer on a classic format as wkhtmltopdf", async ({ page, api }) => {
+	async function insert_classic_format(api) {
 		await api.insert_doc(
 			"Print Format",
 			{
@@ -1069,14 +1069,66 @@ test.describe("Print Format form — renderer notice", () => {
 			true
 		);
 		await api.set_value("Print Format", PF_NAME, { pdf_generator: "" });
+	}
 
-		await page.goto(`/desk/print-format/${encodeURIComponent(PF_NAME)}`);
-		await expect(page.locator(".form-message:visible")).toContainText(
-			"classic builder will be removed"
-		);
-		await expect(
-			page.locator('[data-fieldname="pdf_generator"] .help-box:visible')
-		).toContainText("removed in version 17");
+	for (const site_generator of ["chrome", ""]) {
+		const setting = site_generator ? "explicit Chrome" : "an empty site renderer";
+		test(`inherits Chrome for a blank classic renderer with ${setting}`, async ({
+			page,
+			api,
+		}) => {
+			await api.set_value("Print Settings", "Print Settings", {
+				pdf_generator: site_generator,
+			});
+			const settings = await api.call("frappe.client.get_value", {
+				doctype: "Print Settings",
+				filters: "Print Settings",
+				fieldname: "pdf_generator",
+			});
+			expect(settings.message.pdf_generator).toBe("chrome");
+			await insert_classic_format(api);
+			const stored = await get_format_values(api, PF_NAME, "pdf_generator");
+			expect([null, ""]).toContain(stored.pdf_generator);
+
+			await page.goto(`/desk/print-format/${encodeURIComponent(PF_NAME)}`);
+			await expect
+				.poll(() => page.evaluate(() => window.cur_frm?.doc?.__onload?.pdf_generator))
+				.toBe("chrome");
+			await expect(page.locator('[data-fieldname="pdf_generator"] select')).toHaveValue("");
+			await expect(page.locator(".form-message:visible")).toContainText(
+				"classic builder will be removed"
+			);
+			await expect(
+				page.locator('[data-fieldname="pdf_generator"] .help-box:visible')
+			).not.toBeVisible();
+		});
+	}
+
+	test("rejects legacy renderer writes and preserves the saved Chrome and inherited choices", async ({
+		api,
+	}) => {
+		await insert_classic_format(api);
+		for (const [doctype, name] of [
+			["Print Settings", "Print Settings"],
+			["Print Format", PF_NAME],
+		]) {
+			const response = await api.request.post("/api/method/frappe.client.set_value", {
+				data: { doctype, name, fieldname: { pdf_generator: "wkhtmltopdf" } },
+				headers: await api.headers(),
+			});
+			expect(response.status(), await response.text()).toBe(417);
+			const body = await response.json();
+			expect(body.exc_type).toBe("ValidationError");
+			expect(body.exception).toContain("This renderer is unavailable. Select Chrome");
+		}
+		const settings = await api.call("frappe.client.get_value", {
+			doctype: "Print Settings",
+			filters: "Print Settings",
+			fieldname: "pdf_generator",
+		});
+		expect(settings.message.pdf_generator).toBe("chrome");
+		const stored = await get_format_values(api, PF_NAME, "pdf_generator");
+		expect([null, ""]).toContain(stored.pdf_generator);
 	});
 });
 
