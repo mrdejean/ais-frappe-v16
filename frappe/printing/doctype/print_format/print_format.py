@@ -162,7 +162,9 @@ class PrintFormat(Document):
 	def validate_pdf_generator(self):
 		if self.pdf_generator == "wkhtmltopdf":
 			frappe.throw(
-				_("This renderer is unavailable. Select Chrome and review migrated/custom PDF output before use."),
+				_(
+					"This renderer is unavailable. Select Chrome and review migrated/custom PDF output before use."
+				),
 				title=_("PDF renderer review required"),
 			)
 

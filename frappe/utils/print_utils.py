@@ -40,7 +40,9 @@ def resolve_pdf_generator(print_format=None, pdf_generator: str | None = None) -
 	from frappe.printing.doctype.print_format.classic_converter import uses_beta_renderer
 	from frappe.utils.pdf_generator.pluto import plutoprint_blockers
 
-	if pdf_generator == "wkhtmltopdf" or (print_format and print_format.get("pdf_generator") == "wkhtmltopdf"):
+	if pdf_generator == "wkhtmltopdf" or (
+		print_format and print_format.get("pdf_generator") == "wkhtmltopdf"
+	):
 		frappe.throw(
 			"wkhtmltopdf is unavailable in the isolated pdfkit-free prototype. "
 			"Review and migrate Print Settings and the Print Format to Chrome before printing.",

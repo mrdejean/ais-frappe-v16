@@ -110,7 +110,7 @@ jobs:
         run: |
           bench --site test_site \
             run-parallel-tests \
-            --app "${{ github.event.repository.name }}" \
+            --app "frappe" \
             --total-builds ${{ inputs.parallel-runs }} \
             --build-number ${{ matrix.index }} 2> >(tee -a stderr.log >&2)
 
@@ -138,6 +138,14 @@ jobs:
           # consumed by bench run-parallel-tests
           CAPTURE_COVERAGE: ${{ inputs.enable-coverage }}
           FRAPPE_SENTRY_DSN: ${{ secrets.SENTRY_DSN || '' }}
+
+      - name: Retain reviewed native renderer proof
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ais-native-renderer-server-${{ matrix.db }}-${{ matrix.index }}
+          path: ${{ runner.temp }}/ais-native-renderer-proof.json
+          if-no-files-found: error
 
       - name: Upload coverage data
         uses: actions/upload-artifact@v6
@@ -183,4 +191,3 @@ jobs:
           if all(r in dopass for r in stati):
             exit(0)
           exit(1)
-

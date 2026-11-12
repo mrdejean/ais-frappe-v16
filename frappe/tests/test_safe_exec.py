@@ -88,7 +88,6 @@ class TestSafeExec(IntegrationTestCase):
 		# Allowed read query
 		frappe.render_template(""" {{ frappe.qb.from_("User").select("*").run() }} """)
 
-
 	def test_auth_table_not_readable(self):
 		with self.set_user("Guest"):
 			for template in (

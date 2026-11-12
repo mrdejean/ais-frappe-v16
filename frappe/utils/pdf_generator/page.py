@@ -65,10 +65,21 @@ def sanitize_guarded_html(html: str, site_url: str) -> str:
 	produce a Fetch interception event. Trusted pagination runs explicitly via CDP.
 	"""
 	soup = BeautifulSoup(html, "html5lib")
-	for tag in soup.find_all([
-		"script", "iframe", "frame", "frameset", "object", "embed", "base",
-		"animate", "animatemotion", "animatetransform", "set",
-	]):
+	for tag in soup.find_all(
+		[
+			"script",
+			"iframe",
+			"frame",
+			"frameset",
+			"object",
+			"embed",
+			"base",
+			"animate",
+			"animatemotion",
+			"animatetransform",
+			"set",
+		]
+	):
 		tag.decompose()
 	for tag in soup.find_all("meta"):
 		if str(tag.get("http-equiv", "")).lower() in ("refresh", "content-security-policy"):
@@ -327,10 +338,9 @@ class Page:
 						stub.set_result(data["request_id"])
 						return
 					resource = None
-					if (
-						getattr(self, "_guarded_resources_enabled", False)
-						and resource_origin(url) == resource_origin(self.trusted_site_url)
-					):
+					if getattr(self, "_guarded_resources_enabled", False) and resource_origin(
+						url
+					) == resource_origin(self.trusted_site_url):
 						resource = read_guarded_local_resource(url)
 					if resource:
 						content, content_type = resource
@@ -340,7 +350,8 @@ class Page:
 								"requestId": data["request_id"],
 								"responseCode": 200,
 								"responseHeaders": [{"name": "Content-Type", "value": content_type}]
-								if content_type else [],
+								if content_type
+								else [],
 								"body": content,
 							},
 							return_future=True,

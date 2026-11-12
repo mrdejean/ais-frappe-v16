@@ -88,13 +88,18 @@ runs:
     run: |
       # Install System Dependencies
       start_time=$(date +%s)
-      curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-11.8.5" --skip-maxscale
+      curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | sudo bash -s -- --mariadb-server-version="mariadb-11.8.9" --skip-maxscale
 
-      sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-      wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+      PGDG_KEY_PATH="${RUNNER_TEMP}/ais-pgdg.asc"
+      curl --fail --location --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc -o "$PGDG_KEY_PATH"
+      PGDG_FINGERPRINT="$(gpg --batch --show-keys --with-colons "$PGDG_KEY_PATH" | awk -F: '$1 == "fpr" { print $10; exit }')"
+      test "$PGDG_FINGERPRINT" = "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
+      sudo install -d /usr/share/postgresql-common/pgdg
+      sudo install -m 0644 "$PGDG_KEY_PATH" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+      sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
 
       sudo apt -qq update
-      sudo apt -qq remove mysql-server mysql-client
+      sudo apt -qq remove -y mysql-server mysql-client mysql-server-core mysql-client-core
       sudo apt -qq remove -y postgresql-client postgresql-client-16 postgresql-client-common
       sudo apt -qq install libcups2-dev redis-server mariadb-client libmariadb-dev postgresql-client-18 libpq-dev
       echo "/usr/lib/postgresql/18/bin" >> $GITHUB_PATH
@@ -188,6 +193,20 @@ runs:
 
       end_time=$(date +%s)
       echo -e "\033[33mCreate Site: $((end_time - start_time)) seconds\033[0m"
+
+  - name: Provision reviewed native CI PDF renderer
+    shell: bash -e {0}
+    env:
+      CI: "Yes"
+      AIS_PDFKIT_FREE_PROTOTYPE: "Yes"
+    run: |
+      # Explicit opt-in applies only to this disposable native test job.
+      echo "AIS_PDFKIT_FREE_PROTOTYPE=Yes" >> "$GITHUB_ENV"
+      env/bin/python apps/frappe/.github/helper/provision_ais_pdf_renderer.py
+      renderer="$(env/bin/python -c 'import json, os; from pathlib import Path; print(json.loads((Path(os.environ["RUNNER_TEMP"]) / "ais-native-renderer-proof.json").read_text())["path"])')"
+      bench set-config -g chromium_path "$renderer"
+      echo "AIS_CHROMIUM_PATH=$renderer" >> "$GITHUB_ENV"
+      env/bin/python -c 'import json, os; from pathlib import Path; print("AIS_CHROMIUM_VERSION=" + json.loads((Path(os.environ["RUNNER_TEMP"]) / "ais-native-renderer-proof.json").read_text())["version"])' >> "$GITHUB_ENV"
 
   - shell: bash -e {0}
     run: |
